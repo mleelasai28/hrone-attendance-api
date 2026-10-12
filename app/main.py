@@ -693,7 +693,11 @@ def department_summary(month: str, department: Optional[str] = None):
             "department": dept,
             "headcount": employee["headcount"],
             "present_days": values.get("present_days", 0),
-            "avg_work_hours": values.get("avg_work_hours"),
+            "avg_work_hours": (
+    round_half_up(values["avg_work_hours"], 2)
+    if values.get("avg_work_hours") is not None
+    else None
+),
             "late_count": values.get("late_count", 0),
             "total_late_minutes": values.get("total_late_minutes", 0),
             "leave_count": values.get("leave_count", 0),
