@@ -400,10 +400,10 @@ def punch_out(body: PunchOutIn):
 
     punch_in_time = mongo_datetime(record["punch_in"])
 
-    if punched_at <= punch_in_time:
+    if (punched_at - punch_in_time).total_seconds() > 24 * 3600:
         raise HTTPException(
             status_code=422,
-            detail="Punch-out must be after punch-in",
+            detail="Punch duration cannot exceed 24 hours",
         )
 
     hours = compute_work_hours(punch_in_time, punched_at)
