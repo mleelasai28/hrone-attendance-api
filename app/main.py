@@ -163,6 +163,9 @@ def create_indexes():
     db.attendance_logs.create_index(
         [("date", ASCENDING), ("status", ASCENDING)]
     )
+    db.attendance_logs.create_index(
+        [("date", DESCENDING), ("emp_code", ASCENDING)]
+    )
 
 
 # ----------------------------- Models ----------------------------------
@@ -1284,21 +1287,12 @@ def explain_endpoint(
         }
 
     explain = db.command("explain", command, verbosity="executionStats")
-    explain_text = str(explain)
+    explain_text = str(explain).lower()
 
     return {
         "endpoint": endpoint,
         "collection": collection_name,
         "explain": explain,
-        "uses_ixscan": any(
-    stage.get("indexesUsed")
-    for stage in explain.get("stages", [])
-    if isinstance(stage, dict)
-),
-        "uses_collscan": any(
-    stage.get("collectionScans", 0) > 0
-    for stage in explain.get("stages", [])
-    if isinstance(stage, dict)
-),
+                "uses_ixscan": "IXSCAN" in str(explain).upper(),
+        "uses_collscan": "COLLSCAN" in str(explain).upper(),
     }
-
