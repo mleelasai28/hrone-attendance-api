@@ -746,6 +746,15 @@ def department_summary(month: str, department: Optional[str] = None):
         "uses_collscan": uses_collscan,
     }
 
+
+# ----------------------------- Late Leaderboard ------------------------
+
+@app.get("/analytics/late-leaderboard")
+def late_leaderboard(
+    month: str,
+    limit: int = Query(10, ge=1, le=50),
+    department: Optional[str] = None,
+):
     """Rank employees by monthly late minutes using competition ranking."""
     validate_month(month)
     month_start, month_end = month_bounds(month)
@@ -766,7 +775,6 @@ def department_summary(month: str, department: Optional[str] = None):
             "foreignField": "emp_code",
             "as": "employee",
         }},
-        # Logs for employees that no longer exist must not appear.
         {"$unwind": "$employee"},
     ]
 
@@ -774,12 +782,10 @@ def department_summary(month: str, department: Optional[str] = None):
         pipeline.append({"$match": {"employee.department": department}})
 
     pipeline.extend([
-        # Rank only by the score, so equal scores share the same competition rank.
         {"$setWindowFields": {
             "sortBy": {"total_late_minutes": -1},
             "output": {"rank": {"$rank": {}}},
         }},
-        # Apply the rank limit after ranking, preserving ties at the cutoff.
         {"$match": {"rank": {"$lte": limit}}},
         {"$sort": {"total_late_minutes": -1, "_id": 1}},
         {"$project": {
@@ -793,7 +799,11 @@ def department_summary(month: str, department: Optional[str] = None):
         }},
     ])
 
-    return {"month": month, "items": list(db.attendance_logs.aggregate(pipeline))}
+    return {
+        "month": month,
+        "items": list(db.attendance_logs.aggregate(pipeline)),
+    }
+
 
 
 # ----------------------------- Department Trend ------------------------
