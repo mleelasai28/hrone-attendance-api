@@ -1,42 +1,31 @@
-
 # Technical Decisions
 
-## Framework and Database
+## 1. Indexing Strategy
 
-- FastAPI is used to expose REST endpoints and generate interactive API documentation.
-- MongoDB is used to store employee and attendance records.
-- PyMongo is used for database access and aggregation pipelines.
+Compound indexes support the most common query patterns, especially attendance lookups by employee and date, date-based analytics, and employee lookups by department. Index field order matters because MongoDB can efficiently use a compound index for queries matching its leading fields. The admin explain endpoint exposes execution statistics to help verify index usage.
 
-## Attendance Dates and Timestamps
+## 2. Preventing Duplicate Punch-In
 
-- API timestamps are represented as epoch milliseconds.
-- MongoDB stores timestamp values as BSON datetimes.
-- Attendance dates use the Asia/Kolkata calendar.
-- Overnight shifts require attendance-date handling across midnight.
+A unique compound index on `emp_code` and `date` prevents more than one attendance record for an employee on the same attendance date. Application-level checks alone are insufficient because simultaneous requests can both pass a check. The database constraint provides the final protection, and duplicate-key errors should be translated into an appropriate conflict response.
 
-## Attendance Calculations
+## 3. Leaderboard Ties
 
-- Late arrivals are evaluated against the employee's configured shift start.
-- Overtime is calculated relative to the configured shift end.
-- Half-day classification is based on calculated work hours.
-- Working-day analytics use Monday through Friday.
+The late-arrival leaderboard uses competition ranking. Employees with equal total late minutes receive the same rank, and the next rank skips accordingly. The rank filter is applied before the result is limited, so employees tied at the cutoff are not arbitrarily excluded.
 
-## Regularization and Audit History
+## 4. Employees Without Attendance Logs
 
-- Attendance corrections are performed through the PATCH endpoint.
-- Regularization history records the actor, reason, timestamp, and field changes.
+Attendance-based aggregation alone cannot include employees who have no matching attendance records. To report department headcount accurately, employee records must be considered separately from attendance logs. Missing attendance statistics should be represented with zero values where appropriate, rather than removing employees from headcount calculations.
 
-## Analytics and Query Performance
+## 5. Scaling to 100 Times More Data
 
-- MongoDB aggregation pipelines are used for analytics.
-- The department trend uses `$densify` to generate a daily date series.
-- Working-day attendance rates exclude weekends when calculating the seven-day moving average.
-- The late-arrival leaderboard uses competition ranking and applies the result limit after ranking to preserve ties.
+I would review query plans and execution statistics, maintain indexes for actual query patterns, and avoid unnecessary document retrieval. Aggregation pipelines should filter early where possible. For larger workloads, I would measure database load, consider archival or retention policies, and evaluate pagination and deployment capacity using representative production-scale data.
+
+## Additional Technical Decisions
+
+- FastAPI exposes REST endpoints and interactive API documentation.
+- PyMongo provides access to MongoDB aggregation pipelines.
+- Attendance dates use the Asia/Kolkata calendar, while API timestamps use epoch milliseconds and MongoDB stores timestamps as BSON datetimes.
+- The department trend uses `$densify` for a daily date series and excludes weekends from working-day attendance rates.
 - Department summary average work hours use half-up rounding to two decimal places.
-- Compound indexes support common attendance queries.
-- The admin explain endpoint uses MongoDB `executionStats` verbosity to expose query-plan and execution information.
-
-## Configuration and Security
-
-- MongoDB connection settings can be supplied through environment variables.
-- Secrets and local environment files must not be committed to Git.
+- Regularization records preserve the actor, reason, timestamp, and field changes.
+- Environment variables supply database configuration; secrets and local environment files must not be committed.

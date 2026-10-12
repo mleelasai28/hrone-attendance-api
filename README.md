@@ -1,4 +1,3 @@
-
 # Employee Attendance & Analytics API
 
 A REST API built with FastAPI and MongoDB for employee management, attendance tracking, attendance regularization, and analytics.
@@ -12,11 +11,11 @@ A REST API built with FastAPI and MongoDB for employee management, attendance tr
 - Monthly employee attendance analytics
 - Department summary and daily trend analytics
 - Late-arrival leaderboard
-- MongoDB query-plan inspection
+- MongoDB query-plan inspection using execution statistics
 
 ## Tech Stack
 
-- Python
+- Python 3.11+
 - FastAPI
 - MongoDB
 - PyMongo
@@ -24,78 +23,94 @@ A REST API built with FastAPI and MongoDB for employee management, attendance tr
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11 or later
 - MongoDB running locally or on an accessible server
 - pip
 
 ## Setup
 
-1. Clone this repository.
-2. Open the project directory in a terminal.
-3. Create and activate a virtual environment.
-4. Install dependencies:
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/mleelasai28/hrone-attendance-api.git
+   cd hrone-attendance-api
+   ```
+
+2. Create and activate a virtual environment.
+
+   Windows PowerShell:
+
+   ```powershell
+   py -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
+
+3. Install dependencies:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-5. Configure `MONGO_URI` and `MONGO_DB` environment variables if needed. The default database name is `attendance_db`.
-6. Start the API:
+4. Configure the MongoDB connection using environment variables if required.
+
+5. Start the API:
 
    ```bash
-   py -m uvicorn app.main:app --port 8000
+   py -m uvicorn app.main:app --reload --port 8000
    ```
 
-7. Open the interactive API documentation at:
+6. Open the interactive API documentation:
 
    http://127.0.0.1:8000/docs
 
 ## Configuration
 
 - `MONGO_URI`: MongoDB connection URI.
-- `MONGO_DB`: MongoDB database name.
+- `MONGO_DB`: MongoDB database name. The default is `attendance_db`.
 
 Do not commit `.env` files, credentials, or other secrets.
 
 ## API Endpoints
 
-- `GET /health`
-- `POST /employees`
-- `GET /employees`
-- `POST /attendance/punch-in`
-- `POST /attendance/punch-out`
-- `GET /attendance`
-- `PATCH /attendance/{emp_code}/{date}`
-- `GET /analytics/employees/{emp_code}/monthly`
-- `GET /analytics/departments/summary`
-- `GET /analytics/leaderboard/late`
-- `GET /analytics/departments/{department}/trend`
-- `GET /admin/explain/{endpoint}`
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/health` | Health check |
+| POST | `/employees` | Create an employee |
+| GET | `/employees` | List employees |
+| POST | `/attendance/punch-in` | Record punch-in |
+| POST | `/attendance/punch-out` | Record punch-out |
+| GET | `/attendance` | List attendance records |
+| PATCH | `/attendance/{emp_code}/{date}` | Regularize attendance |
+| GET | `/analytics/employees/{emp_code}/monthly` | Employee monthly analytics |
+| GET | `/analytics/departments/summary` | Department summary |
+| GET | `/analytics/leaderboard/late` | Late-arrival leaderboard |
+| GET | `/analytics/departments/{department}/trend` | Daily department trend |
+| GET | `/admin/explain/{endpoint}` | Inspect MongoDB query execution |
 
 ## Testing
 
-Use `/docs` to test endpoints and review their response codes and response bodies. Verify attendance calculations, validation rules, audit history, and MongoDB query plans before submission.
+Use `/docs` to exercise the endpoints and inspect response codes and response bodies. Verify validation rules, attendance calculations, audit history, concurrency safeguards, and query plans.
 
 ## Verification Performed
 
-- Health endpoint tested successfully.
-- Employee creation, duplicate handling, and listing tested.
-- Punch-in, punch-out, and attendance listing tested.
-- Punch-out exceeding 24 hours rejected with HTTP 422.
-- Attendance regularization tested, including audit-history changes.
-- Monthly employee analytics tested.
-- Department summary tested; average work hours now use half-up rounding to two decimal places.
-- Late leaderboard tested; ranking is included in the response and the limit is applied after ranking.
-- Department trend tested for date-range behavior and weekend handling.
-- Admin explain endpoint tested with execution statistics; the attendance query used `IXSCAN` and reported no `COLLSCAN`.
+- The Python syntax check completed successfully.
+- The `department_trend` explain endpoint was tested with a date range.
+- The explain response reported `uses_ixscan: true` and `uses_collscan: false` for that test.
+- The latest code changes were committed and pushed to the `main` branch.
 
-## Items to Verify Before Submission
+Other endpoint checks should be considered complete only after their corresponding tests have been run successfully.
 
-- Invalid timestamp and request-body validation.
-- Overnight shift attendance-date behavior.
-- Late-arrival and overtime boundary conditions.
-- Leaderboard tie handling and department filtering.
-- Pagination limits and filter combinations.
-- Database index creation and uniqueness constraints.
-- All required explain endpoint operations and their response contracts.
-- Installation and startup from a clean environment.
+## Remaining Checks
+
+- Invalid timestamp and request-body validation
+- Overnight-shift attendance-date behavior
+- Late-arrival and overtime boundary conditions
+- Leaderboard tie handling and department filtering
+- Pagination limits and filter combinations
+- Database index creation and uniqueness constraints
+- All five explain endpoint variants and their response contracts
+- Installation and startup from a clean environment
+
+## Security
+
+Never commit database credentials, API secrets, or local environment files to the repository.
