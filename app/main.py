@@ -750,10 +750,10 @@ def department_trend(department: str, month: str):
     year, month_num = validate_month(month)
     month_start, month_end = month_bounds(month)
 
+    
     start = datetime(year, month_num, 1, tzinfo=UTC)
-    end = datetime(
-        year, month_num, monthrange(year, month_num)[1], tzinfo=UTC
-    )
+    end = start + timedelta(days=monthrange(year, month_num)[1])
+
 
     pipeline = [
         {
