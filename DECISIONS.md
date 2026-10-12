@@ -30,8 +30,11 @@
 
 - MongoDB aggregation pipelines are used for analytics.
 - The department trend uses `$densify` to generate a daily date series.
+- Working-day attendance rates exclude weekends when calculating the seven-day moving average.
+- The late-arrival leaderboard uses competition ranking and applies the result limit after ranking to preserve ties.
+- Department summary average work hours use half-up rounding to two decimal places.
 - Compound indexes support common attendance queries.
-- The admin explain endpoint exposes query-plan information to verify index usage.
+- The admin explain endpoint uses MongoDB `executionStats` verbosity to expose query-plan and execution information.
 
 ## Configuration and Security
 

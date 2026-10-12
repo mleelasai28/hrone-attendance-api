@@ -24,7 +24,7 @@ A REST API built with FastAPI and MongoDB for employee management, attendance tr
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - MongoDB running locally or on an accessible server
 - pip
 
@@ -75,3 +75,27 @@ Do not commit `.env` files, credentials, or other secrets.
 ## Testing
 
 Use `/docs` to test endpoints and review their response codes and response bodies. Verify attendance calculations, validation rules, audit history, and MongoDB query plans before submission.
+
+## Verification Performed
+
+- Health endpoint tested successfully.
+- Employee creation, duplicate handling, and listing tested.
+- Punch-in, punch-out, and attendance listing tested.
+- Punch-out exceeding 24 hours rejected with HTTP 422.
+- Attendance regularization tested, including audit-history changes.
+- Monthly employee analytics tested.
+- Department summary tested; average work hours now use half-up rounding to two decimal places.
+- Late leaderboard tested; ranking is included in the response and the limit is applied after ranking.
+- Department trend tested for date-range behavior and weekend handling.
+- Admin explain endpoint tested with execution statistics; the attendance query used `IXSCAN` and reported no `COLLSCAN`.
+
+## Items to Verify Before Submission
+
+- Invalid timestamp and request-body validation.
+- Overnight shift attendance-date behavior.
+- Late-arrival and overtime boundary conditions.
+- Leaderboard tie handling and department filtering.
+- Pagination limits and filter combinations.
+- Database index creation and uniqueness constraints.
+- All required explain endpoint operations and their response contracts.
+- Installation and startup from a clean environment.
