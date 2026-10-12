@@ -694,10 +694,10 @@ def department_summary(month: str, department: Optional[str] = None):
             "headcount": employee["headcount"],
             "present_days": values.get("present_days", 0),
             "avg_work_hours": (
-    round_half_up(values["avg_work_hours"], 2)
-    if values.get("avg_work_hours") is not None
-    else None
-),
+                round_half_up(values["avg_work_hours"], 2)
+                if values.get("avg_work_hours") is not None
+                else None
+            ),
             "late_count": values.get("late_count", 0),
             "total_late_minutes": values.get("total_late_minutes", 0),
             "leave_count": values.get("leave_count", 0),
@@ -705,16 +705,44 @@ def department_summary(month: str, department: Optional[str] = None):
         })
 
     return response
+    def scan_flags(node):
+        ixscan = False
+        collscan = False
 
+        if isinstance(node, dict):
+            ixscan = (
+                node.get("stage") == "IXSCAN"
+                or bool(node.get("indexesUsed"))
+                or node.get("totalKeysExamined", 0) > 0
+            )
+            collscan = (
+                node.get("stage") == "COLLSCAN"
+                or node.get("collectionScans", 0) > 0
+            )
 
-# ----------------------------- Late Leaderboard ------------------------
+            for value in node.values():
+                child_ix, child_coll = scan_flags(value)
+                ixscan = ixscan or child_ix
+                collscan = collscan or child_coll
 
-@app.get("/analytics/leaderboard/late")
-def late_leaderboard(
-    month: str,
-    limit: int = Query(10, ge=1, le=50),
-    department: Optional[str] = Query(None),
-):
+        elif isinstance(node, list):
+            for item in node:
+                child_ix, child_coll = scan_flags(item)
+                ixscan = ixscan or child_ix
+                collscan = collscan or child_coll
+
+        return ixscan, collscan
+
+    uses_ixscan, uses_collscan = scan_flags(explain)
+
+    return {
+        "endpoint": endpoint,
+        "collection": collection_name,
+        "explain": explain,
+        "uses_ixscan": uses_ixscan,
+        "uses_collscan": uses_collscan,
+    }
+
     """Rank employees by monthly late minutes using competition ranking."""
     validate_month(month)
     month_start, month_end = month_bounds(month)
@@ -1262,6 +1290,15 @@ def explain_endpoint(
         "endpoint": endpoint,
         "collection": collection_name,
         "explain": explain,
-        "uses_ixscan": "IXSCAN" in explain_text,
-        "uses_collscan": "COLLSCAN" in explain_text,
+        "uses_ixscan": any(
+    stage.get("indexesUsed")
+    for stage in explain.get("stages", [])
+    if isinstance(stage, dict)
+),
+        "uses_collscan": any(
+    stage.get("collectionScans", 0) > 0
+    for stage in explain.get("stages", [])
+    if isinstance(stage, dict)
+),
     }
+
