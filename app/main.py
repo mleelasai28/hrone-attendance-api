@@ -706,8 +706,13 @@ def department_summary(month: str, department: Optional[str] = None):
 # ----------------------------- Late Leaderboard ------------------------
 
 @app.get("/analytics/leaderboard/late")
-def late_leaderboard(month: str, limit: int = Query(10, ge=1, le=100)):
-    _, _ = validate_month(month)
+def late_leaderboard(
+    month: str,
+    limit: int = Query(10, ge=1, le=50),
+    department: Optional[str] = Query(None),
+):
+    """Rank employees by monthly late minutes using competition ranking."""
+    validate_month(month)
     month_start, month_end = month_bounds(month)
 
     pipeline = [
@@ -720,24 +725,38 @@ def late_leaderboard(month: str, limit: int = Query(10, ge=1, le=100)):
             "late_count": {"$sum": 1},
             "total_late_minutes": {"$sum": "$late_minutes"},
         }},
-        {"$sort": {"total_late_minutes": -1, "_id": 1}},
-        {"$limit": limit},
         {"$lookup": {
             "from": "employees",
             "localField": "_id",
             "foreignField": "emp_code",
             "as": "employee",
         }},
-        {"$unwind": {"path": "$employee", "preserveNullAndEmptyArrays": True}},
+        # Logs for employees that no longer exist must not appear.
+        {"$unwind": "$employee"},
+    ]
+
+    if department is not None:
+        pipeline.append({"$match": {"employee.department": department}})
+
+    pipeline.extend([
+        # Rank only by the score, so equal scores share the same competition rank.
+        {"$setWindowFields": {
+            "sortBy": {"total_late_minutes": -1},
+            "output": {"rank": {"$rank": {}}},
+        }},
+        # Apply the rank limit after ranking, preserving ties at the cutoff.
+        {"$match": {"rank": {"$lte": limit}}},
+        {"$sort": {"total_late_minutes": -1, "_id": 1}},
         {"$project": {
             "_id": 0,
+            "rank": 1,
             "emp_code": "$_id",
             "name": "$employee.name",
             "department": "$employee.department",
             "late_count": 1,
             "total_late_minutes": 1,
         }},
-    ]
+    ])
 
     return {"month": month, "items": list(db.attendance_logs.aggregate(pipeline))}
 
@@ -745,125 +764,137 @@ def late_leaderboard(month: str, limit: int = Query(10, ge=1, le=100)):
 # ----------------------------- Department Trend ------------------------
 
 @app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_: date = Query(alias="from"),
+    to: date = Query(),
+):
+    """Return one analytics row per calendar day in the requested range."""
+    if to < from_:
+        raise HTTPException(422, "to must not be before from")
 
-def department_trend(department: str, month: str):
-    year, month_num = validate_month(month)
-    month_start, month_end = month_bounds(month)
+    day_count = (to - from_).days + 1
+    if day_count > 92:
+        raise HTTPException(422, "Date range must not exceed 92 days")
 
-    
-    start = datetime(year, month_num, 1, tzinfo=UTC)
-    end = start + timedelta(days=monthrange(year, month_num)[1])
+    if not db.employees.count_documents({"department": department}):
+        raise HTTPException(404, "Department not found")
 
+    start_dt = datetime.combine(from_, datetime.min.time()).replace(tzinfo=UTC)
+    end_exclusive = datetime.combine(to + timedelta(days=1), datetime.min.time()).replace(tzinfo=UTC)
 
+    # Start with one seed date, then use $densify in MongoDB to create every day.
+    # This still returns rows when the department has no attendance records in the range.
     pipeline = [
-        {
-            "$match": {
-                "date": {"$gte": month_start, "$lte": month_end}
-            }
-        },
-        {
-            "$lookup": {
-                "from": "employees",
-                "localField": "emp_code",
-                "foreignField": "emp_code",
+        {"$documents": [{"day": start_dt}]},
+        {"$densify": {
+            "field": "day",
+            "range": {"step": 1, "unit": "day", "bounds": [start_dt, end_exclusive]},
+        }},
+        {"$set": {
+            "day_string": {"$dateToString": {"format": "%Y-%m-%d", "date": "$day", "timezone": "UTC"}},
+            "weekday": {"$dayOfWeek": "$day"},
+        }},
+        {"$lookup": {
+            "from": "employees",
+            "let": {"day_string": "$day_string"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$department", department]}}},
+                {"$project": {"_id": 0, "emp_code": 1, "joined_on": 1}},
+            ],
+            "as": "department_employees",
+        }},
+        {"$set": {
+            "headcount": {"$size": {"$filter": {
+                "input": "$department_employees",
                 "as": "employee",
-            }
-        },
-        {"$unwind": "$employee"},
-        {"$match": {"employee.department": department}},
-        {
-            "$addFields": {
-                "day_date": {
-                    "$dateFromString": {"dateString": "$date"}
+                "cond": {"$lte": ["$$employee.joined_on", "$day_string"]},
+            }}},
+            "department_emp_codes": {"$map": {
+                "input": "$department_employees",
+                "as": "employee",
+                "in": "$$employee.emp_code",
+            }},
+            "is_working_day": {"$and": [
+                {"$gte": ["$weekday", 2]},
+                {"$lte": ["$weekday", 6]},
+            ]},
+        }},
+        {"$lookup": {
+            "from": "attendance_logs",
+            "let": {"day_string": "$day_string", "emp_codes": "$department_emp_codes"},
+            "pipeline": [
+                {"$match": {"$expr": {"$and": [
+                    {"$eq": ["$date", "$$day_string"]},
+                    {"$in": ["$emp_code", "$$emp_codes"]},
+                ]}}},
+                {"$group": {
+                    "_id": None,
+                    "present_count": {"$sum": {"$cond": [
+                        {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                        {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1]},
+                        0,
+                    ]}},
+                    "late_count": {"$sum": {"$cond": [
+                        {"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0,
+                    ]}},
+                }},
+            ],
+            "as": "daily_stats",
+        }},
+        {"$set": {
+            "present_count": {"$ifNull": [{"$arrayElemAt": ["$daily_stats.present_count", 0]}, 0]},
+            "late_count": {"$ifNull": [{"$arrayElemAt": ["$daily_stats.late_count", 0]}, 0]},
+        }},
+        {"$set": {
+            "attendance_rate_raw": {"$cond": [
+                {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
+                {"$divide": ["$present_count", "$headcount"]},
+                None,
+            ]},
+        }},
+        # Positive values are rounded half-up to four decimals (rather than $round's ties-to-even).
+        {"$set": {
+            "attendance_rate": {"$cond": [
+                {"$ne": ["$attendance_rate_raw", None]},
+                {"$divide": [{"$trunc": {"$add": [{"$multiply": ["$attendance_rate_raw", 10000]}, 0.5]}}, 10000]},
+                None,
+            ]},
+        }},
+        {"$setWindowFields": {
+            "sortBy": {"day": 1},
+            "output": {
+                "moving_avg_raw": {
+                    "$avg": "$attendance_rate",
+                    "window": {"documents": [-6, 0]},
                 }
-            }
-        },
-        {
-            "$addFields": {
-                "weekday": {"$dayOfWeek": "$day_date"}
-            }
-        },
-        {
-            "$group": {
-                "_id": "$day_date",
-                "present_days": {
-                    "$sum": {
-                        "$cond": [
-                            {
-                                "$and": [
-                                    {"$gte": ["$weekday", 2]},
-                                    {"$lte": ["$weekday", 6]},
-                                    {
-                                        "$in": [
-                                            "$status",
-                                            ["PRESENT", "WFH", "ON_DUTY"],
-                                        ]
-                                    },
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$eq": ["$half_day", True]},
-                                    0.5,
-                                    1,
-                                ]
-                            },
-                            0,
-                        ]
-                    }
-                },
-                "late_count": {
-                    "$sum": {
-                        "$cond": [
-                            {
-                                "$and": [
-                                    {"$gte": ["$weekday", 2]},
-                                    {"$lte": ["$weekday", 6]},
-                                    {
-                                        "$gt": [
-                                            {"$ifNull": ["$late_minutes", 0]},
-                                            0,
-                                        ]
-                                    },
-                                ]
-                            },
-                            1,
-                            0,
-                        ]
-                    }
-                },
-            }
-        },
-        {
-            "$densify": {
-                "field": "_id",
-                "range": {
-                    "step": 1,
-                    "unit": "day",
-                    "bounds": [start, end],
-                },
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "date": {
-                    "$dateToString": {
-                        "format": "%Y-%m-%d",
-                        "date": "$_id",
-                    }
-                },
-                "present_days": {"$ifNull": ["$present_days", 0]},
-                "late_count": {"$ifNull": ["$late_count", 0]},
-            }
-        },
+            },
+        }},
+        {"$set": {
+            "moving_avg_7d": {"$cond": [
+                {"$ne": ["$moving_avg_raw", None]},
+                {"$divide": [{"$trunc": {"$add": [{"$multiply": ["$moving_avg_raw", 10000]}, 0.5]}}, 10000]},
+                None,
+            ]},
+        }},
+        {"$project": {
+            "_id": 0,
+            "date": "$day_string",
+            "is_working_day": 1,
+            "headcount": 1,
+            "present_count": 1,
+            "late_count": 1,
+            "attendance_rate": 1,
+            "moving_avg_7d": 1,
+        }},
         {"$sort": {"date": 1}},
     ]
 
     return {
         "department": department,
-        "month": month,
-        "items": list(db.attendance_logs.aggregate(pipeline)),
+        "from": from_.isoformat(),
+        "to": to.isoformat(),
+        "items": list(db.aggregate(pipeline)),
     }
 
 
