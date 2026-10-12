@@ -904,15 +904,18 @@ def department_trend(
 
 # ----------------------------- Query Explain ---------------------------
 
+
 @app.get("/admin/explain/{endpoint}")
 def explain_endpoint(endpoint: str):
     if endpoint == "employees":
+        collection_name = "employees"
         command = {
             "find": "employees",
             "filter": {"emp_code": {"$gte": "EMP0000", "$lte": "EMP999999"}},
             "sort": {"emp_code": 1},
         }
     elif endpoint == "attendance":
+        collection_name = "attendance_logs"
         command = {
             "find": "attendance_logs",
             "filter": {
@@ -922,14 +925,22 @@ def explain_endpoint(endpoint: str):
             "sort": {"date": 1},
         }
     else:
-        raise HTTPException(422, "endpoint must be employees or attendance")
+        raise HTTPException(
+            status_code=422,
+            detail="endpoint must be employees or attendance",
+        )
 
-    plan = db.command("explain", command, verbosity="queryPlanner")
-    text_plan = str(plan)
+    explain = db.command(
+        "explain",
+        command,
+        verbosity="executionStats",
+    )
+    explain_text = str(explain)
 
     return {
         "endpoint": endpoint,
-        "plan": plan,
-        "uses_ixscan": "IXSCAN" in text_plan,
-        "uses_collscan": "COLLSCAN" in text_plan,
+        "collection": collection_name,
+        "explain": explain,
+        "uses_ixscan": "IXSCAN" in explain_text,
+        "uses_collscan": "COLLSCAN" in explain_text,
     }
