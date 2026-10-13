@@ -4,56 +4,40 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
-
 load_dotenv()
-
 IST = timezone(timedelta(hours=5, minutes=30))
 UTC = timezone.utc
-
 client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
 db = client[os.getenv("MONGO_DB", "attendance_db")]
-
 app = FastAPI(
     title="Employee Attendance & Analytics API",
     version="2.0.0",
 )
-
-
 # ----------------------------- Helpers ---------------------------------
-
 def now_ist():
     return datetime.now(IST).replace(microsecond=0)
-
-
 def timestamp_to_datetime(value):
     if type(value) is not int or not 100000000000 <= value <= 4102444800000:
         raise HTTPException(422, "Timestamp must be epoch milliseconds")
     return datetime.fromtimestamp(value / 1000, tz=UTC).replace(microsecond=0)
-
-
 def datetime_to_ms(value):
     if value is None:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return int(value.timestamp() * 1000)
-
-
 def mongo_datetime(value):
     if value is None:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC).replace(microsecond=0)
-
-
 def parse_date(value):
     try:
         parsed = date.fromisoformat(value)
@@ -62,98 +46,67 @@ def parse_date(value):
         return parsed
     except (ValueError, TypeError):
         raise HTTPException(422, "Date must use YYYY-MM-DD format")
-
-
 def validate_month(month):
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month or ""):
         raise HTTPException(422, "month must use YYYY-MM format")
     return int(month[:4]), int(month[5:])
-
-
 def month_bounds(month):
     year, number = validate_month(month)
     last_day = monthrange(year, number)[1]
     return f"{month}-01", f"{month}-{last_day:02d}"
-
-
 def round_half_up(value, places=2):
     quantum = Decimal("1").scaleb(-places)
     return float(Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP))
-
-
 def shift_datetime(attendance_date, shift_time):
     hour, minute = map(int, shift_time.split(":"))
     return datetime.combine(
         date.fromisoformat(attendance_date),
         datetime.min.time().replace(hour=hour, minute=minute),
     ).replace(tzinfo=IST)
-
-
 def attendance_date_for(punch_in, emp):
     local_time = punch_in.astimezone(IST)
     shift_end_hour, shift_end_minute = map(int, emp["shift_end"].split(":"))
     shift_end_minutes = shift_end_hour * 60 + shift_end_minute
     local_minutes = local_time.hour * 60 + local_time.minute
-
     if emp["shift_end"] <= emp["shift_start"] and local_minutes < shift_end_minutes:
         return (local_time.date() - timedelta(days=1)).isoformat()
-
     return local_time.date().isoformat()
-
-
 def compute_late_minutes(punch_in, shift_start, attendance_date):
     start = shift_datetime(attendance_date, shift_start)
     local_in = punch_in.astimezone(IST)
-
     if start > local_in:
         start -= timedelta(days=1)
-
     minutes = int((local_in - start).total_seconds() // 60)
     return minutes if minutes > 10 else 0
-
-
 def compute_work_hours(punch_in, punch_out):
     hours = (punch_out - punch_in).total_seconds() / 3600
     return round_half_up(hours, 2)
-
-
 def compute_overtime(punch_out, shift_end, attendance_date, punch_in):
     end = shift_datetime(attendance_date, shift_end)
-
     if end <= punch_in.astimezone(IST):
         end += timedelta(days=1)
-
     minutes = max(0, int((punch_out.astimezone(IST) - end).total_seconds() // 60))
     return minutes if minutes >= 30 else 0
-
-
 def serialize_attendance(doc):
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
     for key in ("punch_in", "punch_out"):
         doc[key] = datetime_to_ms(doc.get(key))
-
     for entry in doc.get("history", []):
         entry["at"] = datetime_to_ms(entry.get("at"))
         for change in entry.get("changes", {}).values():
             for key in ("from", "to"):
                 if isinstance(change.get(key), datetime):
                     change[key] = datetime_to_ms(change[key])
-
     return doc
-
-
 def validate_pagination(page, page_size):
     if page < 1 or not 1 <= page_size <= 100:
         raise HTTPException(422, "page must be >= 1 and page_size must be between 1 and 100")
-
-
 def presence_status(status):
     return status in ("PRESENT", "WFH", "ON_DUTY")
-
-
 @app.on_event("startup")
 def create_indexes():
+    db.employees.create_index([("joined_on", ASCENDING)])
     db.employees.create_index([("emp_code", ASCENDING)], unique=True)
     db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)])
     db.attendance_logs.create_index(
@@ -166,10 +119,7 @@ def create_indexes():
     db.attendance_logs.create_index(
         [("date", DESCENDING), ("emp_code", ASCENDING)]
     )
-
-
 # ----------------------------- Models ----------------------------------
-
 class EmployeeIn(BaseModel):
     emp_code: str = Field(pattern=r"^EMP\d{4,6}$")
     name: str = Field(min_length=1, max_length=100)
@@ -178,21 +128,18 @@ class EmployeeIn(BaseModel):
     shift_start: str = "09:30"
     shift_end: str = "18:30"
     joined_on: str
-
     @field_validator("email")
     @classmethod
     def validate_email(cls, value):
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\\.[^@\s]+", value):
             raise ValueError("Invalid email address")
         return value
-
     @field_validator("shift_start", "shift_end")
     @classmethod
     def validate_shift(cls, value):
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
             raise ValueError("Shift time must use HH:MM format")
         return value
-
     @field_validator("joined_on")
     @classmethod
     def validate_joined_on(cls, value):
@@ -202,56 +149,43 @@ class EmployeeIn(BaseModel):
         except ValueError:
             raise ValueError("joined_on must use YYYY-MM-DD format")
         return value
-
     @model_validator(mode="after")
     def validate_shift_range(self):
         if self.shift_start == self.shift_end:
             raise ValueError("shift_start and shift_end must differ")
         return self
-
-
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = None
     status: str = "PRESENT"
-
     @field_validator("punched_at")
     @classmethod
     def validate_timestamp(cls, value):
         if value is not None:
             timestamp_to_datetime(value)
         return value
-
-
 class PunchOutIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = None
-
     @field_validator("punched_at")
     @classmethod
     def validate_timestamp(cls, value):
         if value is not None:
             timestamp_to_datetime(value)
         return value
-
-
 class AttendanceUpdateIn(BaseModel):
     status: Optional[str] = None
     punch_in: Optional[StrictInt] = None
     punch_out: Optional[StrictInt] = None
     reason: str = Field(min_length=5, max_length=200)
     regularized_by: str = Field(min_length=1, max_length=50)
-
     @field_validator("punch_in", "punch_out")
     @classmethod
     def validate_timestamps(cls, value):
         if value is not None:
             timestamp_to_datetime(value)
         return value
-
-
 # ----------------------------- Health ----------------------------------
-
 @app.get("/health")
 def health():
     try:
@@ -259,25 +193,18 @@ def health():
         return {"status": "ok"}
     except Exception:
         raise HTTPException(503, "Database unavailable")
-
-
 # ----------------------------- Employees -------------------------------
-
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
     doc = body.model_dump()
     doc["created_at"] = datetime.now(UTC).replace(microsecond=0)
-
     try:
         result = db.employees.insert_one(doc)
     except DuplicateKeyError:
         raise HTTPException(409, "emp_code already exists")
-
     doc.pop("_id", None)
     doc["created_at"] = datetime_to_ms(doc["created_at"])
     return doc
-
-
 @app.get("/employees")
 def list_employees(
     department: Optional[str] = None,
@@ -287,7 +214,6 @@ def list_employees(
     query = {}
     if department is not None:
         query["department"] = department
-
     total = db.employees.count_documents(query)
     items = list(
         db.employees.find(query, {"_id": 0})
@@ -295,39 +221,25 @@ def list_employees(
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
-
     for item in items:
         item["created_at"] = datetime_to_ms(item.get("created_at"))
-
     return {
         "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
     }
-
-
 # ----------------------------- Punch In --------------------------------
-
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if emp is None:
         raise HTTPException(404, "Employee not found")
-
     if body.status not in ("PRESENT", "WFH", "ON_DUTY"):
         raise HTTPException(422, "Invalid attendance status for punch-in")
-
     punched_at = timestamp_to_datetime(body.punched_at) if body.punched_at is not None else datetime.now(UTC).replace(microsecond=0)
     local_in = punched_at.astimezone(IST)
     attendance_date = attendance_date_for(punched_at, emp)
-
-
-    print("DEBUG punch-in UTC:", punched_at)
-    print("DEBUG punch-in IST:", local_in)
-    print("DEBUG calculated attendance date:", attendance_date)
-    print("DEBUG employee shift:", emp["shift_start"], emp["shift_end"])
-
     doc = {
         "emp_code": body.emp_code,
         "date": attendance_date,
@@ -340,55 +252,39 @@ def punch_in(body: PunchInIn):
         "half_day": False,
         "history": [],
     }
-
     try:
         result = db.attendance_logs.insert_one(doc)
     except DuplicateKeyError:
         raise HTTPException(409, "Already punched in for this attendance date")
-
     doc["_id"] = result.inserted_id
     return serialize_attendance(doc)
-
-
 # ----------------------------- Punch Out -------------------------------
-
-
-
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if emp is None:
         raise HTTPException(status_code=404, detail="Employee not found")
-
     punched_at = (
         timestamp_to_datetime(body.punched_at)
         if body.punched_at is not None
         else datetime.now(UTC).replace(microsecond=0)
     )
-
     attendance_date = attendance_date_for(punched_at, emp)
-
-    print("DEBUG punch-out date:", attendance_date)
-    print("DEBUG employee:", body.emp_code)
     record = db.attendance_logs.find_one({
         "emp_code": body.emp_code,
         "date": attendance_date,
     })
-    print("DEBUG first lookup:", record)
     # For overnight shifts, check the previous attendance date too.
     if record is None:
         previous_date = (
             date.fromisoformat(attendance_date) - timedelta(days=1)
         ).isoformat()
-
         record = db.attendance_logs.find_one({
             "emp_code": body.emp_code,
             "date": previous_date,
         })
-
         if record is not None:
             attendance_date = previous_date
-
     if record is None:
         raise HTTPException(
             status_code=404,
@@ -397,18 +293,14 @@ def punch_out(body: PunchOutIn):
                 "searched_date": attendance_date,
             },
         )
-
     if record.get("punch_out") is not None:
         raise HTTPException(status_code=409, detail="Already punched out")
-
     punch_in_time = mongo_datetime(record["punch_in"])
-
     if (punched_at - punch_in_time).total_seconds() > 24 * 3600:
         raise HTTPException(
             status_code=422,
             detail="Punch duration cannot exceed 24 hours",
         )
-
     hours = compute_work_hours(punch_in_time, punched_at)
     overtime = compute_overtime(
         punched_at,
@@ -416,7 +308,6 @@ def punch_out(body: PunchOutIn):
         attendance_date,
         punch_in_time,
     )
-
     result = db.attendance_logs.update_one(
         {"_id": record["_id"], "punch_out": None},
         {
@@ -428,18 +319,14 @@ def punch_out(body: PunchOutIn):
             }
         },
     )
-
     if result.modified_count != 1:
         raise HTTPException(
             status_code=409,
             detail="Attendance record changed; retry",
         )
-
     updated = db.attendance_logs.find_one({"_id": record["_id"]})
     return serialize_attendance(updated)
-
 # ----------------------------- Attendance List -------------------------
-
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
@@ -454,16 +341,17 @@ def list_attendance(
         query["emp_code"] = emp_code
     if status:
         query["status"] = status
-
-    if date_from:
+    if date_from is not None:
         parse_date(date_from)
         query.setdefault("date", {})["$gte"] = date_from
-    if date_to:
+    if date_to is not None:
         parse_date(date_to)
         query.setdefault("date", {})["$lte"] = date_to
     if date_from and date_to and date_from > date_to:
-        raise HTTPException(422, "date_from must not be after date_to")
-
+        raise HTTPException(
+            status_code=422,
+            detail="date_from must not be after date_to",
+    )
     total = db.attendance_logs.count_documents(query)
     docs = list(
         db.attendance_logs.find(query)
@@ -477,31 +365,23 @@ def list_attendance(
         "page": page,
         "page_size": page_size,
     }
-
-
 # ----------------------------- Regularization --------------------------
-
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize_attendance(emp_code: str, date: str, body: AttendanceUpdateIn):
     parse_date(date)
-
     emp = db.employees.find_one({"emp_code": emp_code})
     if emp is None:
         raise HTTPException(404, "Employee not found")
-
     record = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
     if record is None:
         raise HTTPException(404, "Attendance record not found")
-
     updates = body.model_dump(exclude_unset=True)
     changes = {}
     final_status = updates.get("status", record["status"])
     final_in = timestamp_to_datetime(updates["punch_in"]) if updates.get("punch_in") is not None else record.get("punch_in")
     final_out = timestamp_to_datetime(updates["punch_out"]) if updates.get("punch_out") is not None else record.get("punch_out")
-
     if final_status not in ("PRESENT", "WFH", "ON_DUTY", "ABSENT", "LEAVE"):
         raise HTTPException(422, "Invalid status")
-
     if final_status in ("ABSENT", "LEAVE"):
         if updates.get("punch_in") is not None or updates.get("punch_out") is not None:
             raise HTTPException(422, "ABSENT or LEAVE cannot include punch times")
@@ -509,7 +389,6 @@ def regularize_attendance(emp_code: str, date: str, body: AttendanceUpdateIn):
         final_out = None
     elif final_in is None:
         raise HTTPException(422, "Presence status requires punch_in")
-
     if final_in is not None and final_out is not None:
         if final_out <= final_in:
             raise HTTPException(422, "punch_out must be after punch_in")
@@ -517,7 +396,6 @@ def regularize_attendance(emp_code: str, date: str, body: AttendanceUpdateIn):
             raise HTTPException(422, "Punch duration cannot exceed 24 hours")
         if final_in.astimezone(IST).date().isoformat() != date:
             raise HTTPException(422, "punch_in must fall on the attendance date")
-
     old_values = {
         "status": record.get("status"),
         "punch_in": datetime_to_ms(record.get("punch_in")),
@@ -528,21 +406,17 @@ def regularize_attendance(emp_code: str, date: str, body: AttendanceUpdateIn):
         "punch_in": datetime_to_ms(final_in),
         "punch_out": datetime_to_ms(final_out),
     }
-
     for key in ("status", "punch_in", "punch_out"):
         if old_values[key] != new_values[key]:
             changes[key] = {"from": old_values[key], "to": new_values[key]}
-
     if not changes:
         raise HTTPException(422, "No attendance fields changed")
-
     set_fields = {
         "status": final_status,
         "punch_in": final_in,
         "punch_out": final_out,
         "late_minutes": compute_late_minutes(final_in, emp["shift_start"], date) if final_in else 0,
     }
-
     if final_in is not None and final_out is not None:
         hours = compute_work_hours(final_in, final_out)
         set_fields["work_hours"] = hours
@@ -552,44 +426,39 @@ def regularize_attendance(emp_code: str, date: str, body: AttendanceUpdateIn):
         set_fields["work_hours"] = None
         set_fields["half_day"] = False
         set_fields["overtime_minutes"] = 0
-
     history_entry = {
         "at": datetime.now(UTC).replace(microsecond=0),
         "by": body.regularized_by,
         "reason": body.reason,
         "changes": changes,
     }
-
     result = db.attendance_logs.update_one(
         {"_id": record["_id"], "history": record.get("history", [])},
         {"$set": set_fields, "$push": {"history": history_entry}},
     )
     if result.modified_count != 1:
         raise HTTPException(409, "Attendance record changed; retry")
-
     return serialize_attendance(db.attendance_logs.find_one({"_id": record["_id"]}))
-
-
 # ----------------------------- Monthly Analytics -----------------------
-
 @app.get("/analytics/employees/{emp_code}/monthly")
 def employee_monthly(emp_code: str, month: str):
     year, month_num = validate_month(month)
     emp = db.employees.find_one({"emp_code": emp_code})
     if emp is None:
         raise HTTPException(404, "Employee not found")
-
     month_start, month_end = month_bounds(month)
     start_date = max(date(year, month_num, 1), date.fromisoformat(emp["joined_on"]))
     end_date = date(year, month_num, monthrange(year, month_num)[1])
-
-    working_days = 0
-    current = start_date
-    while current <= end_date:
-        if current.weekday() < 5:
-            working_days += 1
-        current += timedelta(days=1)
-
+    calendar_start = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=UTC)
+    calendar_end = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=UTC)
+    working_day_result = list(db.aggregate([
+        {"$documents": [{"day": calendar_start}]},
+        {"$densify": {"field": "day", "range": {"step": 1, "unit": "day", "bounds": [calendar_start, calendar_end]}}},
+        {"$match": {"day": {"$lt": calendar_end}}},
+        {"$match": {"$expr": {"$in": [{"$dayOfWeek": "$day"}, [2, 3, 4, 5, 6]]}}},
+        {"$count": "working_days"},
+    ]))
+    working_days = working_day_result[0]["working_days"] if working_day_result else 0
     pipeline = [
         {"$match": {"emp_code": emp_code, "date": {"$gte": month_start, "$lte": month_end}}},
         {"$addFields": {"weekday": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}},
@@ -609,14 +478,12 @@ def employee_monthly(emp_code: str, month: str):
             "total_overtime_minutes": {"$sum": {"$ifNull": ["$overtime_minutes", 0]}},
         }},
     ]
-
     result = list(db.attendance_logs.aggregate(pipeline))
     stats = result[0] if result else {}
     present_days = float(stats.get("present_days", 0))
     attendance_pct = None
     if working_days:
         attendance_pct = round_half_up(present_days * 100 / working_days)
-
     return {
         "emp_code": emp_code,
         "month": month,
@@ -628,127 +495,55 @@ def employee_monthly(emp_code: str, month: str):
         "total_overtime_minutes": stats.get("total_overtime_minutes", 0),
         "attendance_pct": attendance_pct,
     }
-
-
 # ----------------------------- Department Summary ----------------------
-
-@app.get("/analytics/departments/summary")
-def department_summary(month: str, department: Optional[str] = None):
-    _, _ = validate_month(month)
-    month_start, month_end = month_bounds(month)
-
+def department_summary_pipeline(month_start, month_end, department=None):
     employee_match = {"joined_on": {"$lte": month_end}}
     if department is not None:
         employee_match["department"] = department
-
-    employees = list(db.employees.aggregate([
+    return [
         {"$match": employee_match},
-        {"$group": {"_id": "$department", "headcount": {"$sum": 1}}},
-        {"$sort": {"_id": 1}},
-    ]))
-
-    attendance_pipeline = [
-        {"$match": {"date": {"$gte": month_start, "$lte": month_end}}},
+        {"$group": {"_id": "$department", "headcount": {"$sum": 1}, "emp_codes": {"$push": "$emp_code"}}},
         {"$lookup": {
-            "from": "employees",
-            "localField": "emp_code",
-            "foreignField": "emp_code",
-            "as": "employee",
+            "from": "attendance_logs",
+            "let": {"emp_codes": "$emp_codes"},
+            "pipeline": [
+                {"$match": {"date": {"$gte": month_start, "$lte": month_end}, "$expr": {"$in": ["$emp_code", "$$emp_codes"]}}},
+                {"$set": {"weekday": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}},
+                {"$group": {
+                    "_id": None,
+                    "present_days": {"$sum": {"$cond": [{"$and": [{"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]}, {"$in": ["$weekday", [2, 3, 4, 5, 6]]}]}, {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1]}, 0]}},
+                    "avg_work_hours_raw": {"$avg": {"$cond": [{"$and": [{"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]}, {"$ne": ["$work_hours", None]}]}, "$work_hours", None]}},
+                    "late_count": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]}},
+                    "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+                    "leave_count": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
+                    "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$status", "ON_DUTY"]}, 1, 0]}},
+                }},
+                {"$set": {"avg_work_hours": {"$cond": [{"$ne": ["$avg_work_hours_raw", None]}, {"$divide": [{"$trunc": {"$add": [{"$multiply": ["$avg_work_hours_raw", 100]}, 0.5]}}, 100]}, None]}}},
+            ],
+            "as": "attendance_stats",
         }},
-        {"$unwind": "$employee"},
-        {"$match": {"employee.joined_on": {"$lte": month_end}}},
+        {"$set": {"stats": {"$ifNull": [{"$arrayElemAt": ["$attendance_stats", 0]}, {}]}}},
+        {"$project": {
+            "_id": 0, "department": "$_id", "headcount": 1,
+            "present_days": {"$ifNull": ["$stats.present_days", 0]},
+            "avg_work_hours": {"$ifNull": ["$stats.avg_work_hours", None]},
+            "late_count": {"$ifNull": ["$stats.late_count", 0]},
+            "total_late_minutes": {"$ifNull": ["$stats.total_late_minutes", 0]},
+            "leave_count": {"$ifNull": ["$stats.leave_count", 0]},
+            "on_duty_count": {"$ifNull": ["$stats.on_duty_count", 0]},
+        }},
+        {"$sort": {"department": 1}},
     ]
 
-    if department is not None:
-        attendance_pipeline.append({"$match": {"employee.department": department}})
 
-    attendance_pipeline.append({"$group": {
-        "_id": "$employee.department",
-        "present_days": {"$sum": {"$cond": [
-            {"$and": [
-                {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
-                {"$in": [{"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}, [2, 3, 4, 5, 6]]},
-            ]},
-            {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1]},
-            0,
-        ]}},
-        "avg_work_hours": {"$avg": {"$cond": [
-            {"$and": [
-                {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
-                {"$ne": ["$work_hours", None]},
-            ]},
-            "$work_hours",
-            None,
-        ]}},
-        "late_count": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]}},
-        "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
-        "leave_count": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
-        "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$status", "ON_DUTY"]}, 1, 0]}},
-    }})
-
-    stats = {item["_id"]: item for item in db.attendance_logs.aggregate(attendance_pipeline)}
-    response = []
-
-    for employee in employees:
-        dept = employee["_id"]
-        values = stats.get(dept, {})
-        response.append({
-            "department": dept,
-            "headcount": employee["headcount"],
-            "present_days": values.get("present_days", 0),
-            "avg_work_hours": (
-                round_half_up(values["avg_work_hours"], 2)
-                if values.get("avg_work_hours") is not None
-                else None
-            ),
-            "late_count": values.get("late_count", 0),
-            "total_late_minutes": values.get("total_late_minutes", 0),
-            "leave_count": values.get("leave_count", 0),
-            "on_duty_count": values.get("on_duty_count", 0),
-        })
-
-    return response
-    def scan_flags(node):
-        ixscan = False
-        collscan = False
-
-        if isinstance(node, dict):
-            ixscan = (
-                node.get("stage") == "IXSCAN"
-                or bool(node.get("indexesUsed"))
-                or node.get("totalKeysExamined", 0) > 0
-            )
-            collscan = (
-                node.get("stage") == "COLLSCAN"
-                or node.get("collectionScans", 0) > 0
-            )
-
-            for value in node.values():
-                child_ix, child_coll = scan_flags(value)
-                ixscan = ixscan or child_ix
-                collscan = collscan or child_coll
-
-        elif isinstance(node, list):
-            for item in node:
-                child_ix, child_coll = scan_flags(item)
-                ixscan = ixscan or child_ix
-                collscan = collscan or child_coll
-
-        return ixscan, collscan
-
-    uses_ixscan, uses_collscan = scan_flags(explain)
-
-    return {
-        "endpoint": endpoint,
-        "collection": collection_name,
-        "explain": explain,
-        "uses_ixscan": uses_ixscan,
-        "uses_collscan": uses_collscan,
-    }
-
+@app.get("/analytics/departments/summary")
+def department_summary(month: str, department: Optional[str] = None):
+    validate_month(month)
+    month_start, month_end = month_bounds(month)
+    pipeline = department_summary_pipeline(month_start, month_end, department)
+    return list(db.employees.aggregate(pipeline))
 
 # ----------------------------- Late Leaderboard ------------------------
-
 @app.get("/analytics/late-leaderboard")
 def late_leaderboard(
     month: str,
@@ -758,7 +553,6 @@ def late_leaderboard(
     """Rank employees by monthly late minutes using competition ranking."""
     validate_month(month)
     month_start, month_end = month_bounds(month)
-
     pipeline = [
         {"$match": {
             "date": {"$gte": month_start, "$lte": month_end},
@@ -777,10 +571,8 @@ def late_leaderboard(
         }},
         {"$unwind": "$employee"},
     ]
-
     if department is not None:
         pipeline.append({"$match": {"employee.department": department}})
-
     pipeline.extend([
         {"$setWindowFields": {
             "sortBy": {"total_late_minutes": -1},
@@ -798,16 +590,11 @@ def late_leaderboard(
             "total_late_minutes": 1,
         }},
     ])
-
     return {
         "month": month,
         "items": list(db.attendance_logs.aggregate(pipeline)),
     }
-
-
-
 # ----------------------------- Department Trend ------------------------
-
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(
     department: str,
@@ -817,17 +604,13 @@ def department_trend(
     """Return one analytics row per calendar day in the requested range."""
     if to < from_:
         raise HTTPException(422, "to must not be before from")
-
     day_count = (to - from_).days + 1
     if day_count > 92:
         raise HTTPException(422, "Date range must not exceed 92 days")
-
     if not db.employees.count_documents({"department": department}):
         raise HTTPException(404, "Department not found")
-
     start_dt = datetime.combine(from_, datetime.min.time()).replace(tzinfo=UTC)
     end_exclusive = datetime.combine(to + timedelta(days=1), datetime.min.time()).replace(tzinfo=UTC)
-
     # Start with one seed date, then use $densify in MongoDB to create every day.
     # This still returns rows when the department has no attendance records in the range.
     pipeline = [
@@ -934,20 +717,35 @@ def department_trend(
         }},
         {"$sort": {"date": 1}},
     ]
-
     return {
         "department": department,
         "from": from_.isoformat(),
         "to": to.isoformat(),
         "items": list(db.aggregate(pipeline)),
     }
-
-
 # ----------------------------- Query Explain ---------------------------
+def scan_flags(node):
+    ixscan = False
+    collscan = False
+    if isinstance(node, dict):
+        ixscan = (node.get("stage") == "IXSCAN" or bool(node.get("indexesUsed")) or node.get("totalKeysExamined", 0) > 0)
+        collscan = (node.get("stage") == "COLLSCAN" or node.get("collectionScans", 0) > 0)
+        for value in node.values():
+            child_ix, child_coll = scan_flags(value)
+            ixscan = ixscan or child_ix
+            collscan = collscan or child_coll
+    elif isinstance(node, list):
+        for item in node:
+            child_ix, child_coll = scan_flags(item)
+            ixscan = ixscan or child_ix
+            collscan = collscan or child_coll
+    return ixscan, collscan
+
 
 @app.get("/admin/explain/{endpoint}")
 def explain_endpoint(
     endpoint: str,
+    status: Optional[str] = None,
     emp_code: Optional[str] = None,
     month: Optional[str] = None,
     department: Optional[str] = None,
@@ -966,43 +764,44 @@ def explain_endpoint(
         "late_leaderboard",
         "department_trend",
     }
-
     if endpoint not in allowed:
         raise HTTPException(
             status_code=422,
             detail=f"endpoint must be one of: {', '.join(sorted(allowed))}",
         )
-
     if endpoint == "attendance_list":
         collection_name = "attendance_logs"
         filters = {}
-
+        if date_from is not None and date_to is not None:
+            if date_from > date_to:
+                raise HTTPException(
+                    status_code=422,
+                    detail="date_from must be on or before date_to",
+                )
         if emp_code is not None:
             filters["emp_code"] = emp_code
         if date_from is not None:
             filters.setdefault("date", {})["$gte"] = date_from.isoformat()
         if date_to is not None:
             filters.setdefault("date", {})["$lte"] = date_to.isoformat()
-
+        if status is not None:
+            filters["status"] = status
         command = {
             "find": collection_name,
             "filter": filters,
-            "sort": {"date": -1, "emp_code": 1},
+            "sort": {"date": -1},
             "skip": (page - 1) * page_size,
             "limit": page_size,
         }
-
     elif endpoint == "employee_monthly":
         if not emp_code or not month:
             raise HTTPException(
                 status_code=422,
                 detail="emp_code and month are required",
             )
-
         validate_month(month)
         month_start, month_end = month_bounds(month)
         collection_name = "attendance_logs"
-
         pipeline = [
             {"$match": {
                 "emp_code": emp_code,
@@ -1036,57 +835,20 @@ def explain_endpoint(
             }},
         ]
         command = {"aggregate": collection_name, "pipeline": pipeline, "cursor": {}}
-
     elif endpoint == "department_summary":
         if not month:
             raise HTTPException(status_code=422, detail="month is required")
-
         validate_month(month)
         month_start, month_end = month_bounds(month)
-        collection_name = "attendance_logs"
-
-        match_stage = {"date": {"$gte": month_start, "$lte": month_end}}
-        pipeline = [
-            {"$match": match_stage},
-            {"$lookup": {
-                "from": "employees",
-                "localField": "emp_code",
-                "foreignField": "emp_code",
-                "as": "employee",
-            }},
-            {"$unwind": "$employee"},
-            {"$match": {"employee.joined_on": {"$lte": month_end}}},
-        ]
-
-        if department is not None:
-            pipeline.append({"$match": {"employee.department": department}})
-
-        pipeline.append({"$group": {
-            "_id": "$employee.department",
-            "present_days": {"$sum": {"$cond": [
-                {"$and": [
-                    {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
-                    {"$in": [{"$dayOfWeek": {
-                        "$dateFromString": {"dateString": "$date"}
-                    }}, [2, 3, 4, 5, 6]]},
-                ]},
-                {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1]},
-                0,
-            ]}},
-            "late_count": {"$sum": {"$cond": [
-                {"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0
-            ]}},
-        }})
+        collection_name = "employees"
+        pipeline = department_summary_pipeline(month_start, month_end, department)
         command = {"aggregate": collection_name, "pipeline": pipeline, "cursor": {}}
-
     elif endpoint == "late_leaderboard":
         if not month:
             raise HTTPException(status_code=422, detail="month is required")
-
         validate_month(month)
         month_start, month_end = month_bounds(month)
         collection_name = "attendance_logs"
-
         pipeline = [
             {"$match": {
                 "date": {"$gte": month_start, "$lte": month_end},
@@ -1105,10 +867,8 @@ def explain_endpoint(
             }},
             {"$unwind": "$employee"},
         ]
-
         if department is not None:
             pipeline.append({"$match": {"employee.department": department}})
-
         pipeline.extend([
             {"$setWindowFields": {
                 "sortBy": {"total_late_minutes": -1},
@@ -1118,33 +878,26 @@ def explain_endpoint(
             {"$sort": {"total_late_minutes": -1, "_id": 1}},
         ])
         command = {"aggregate": collection_name, "pipeline": pipeline, "cursor": {}}
-
     else:  # department_trend
         trend_from = from_ or date_from
         trend_to = to or date_to
-
         if not department or trend_from is None or trend_to is None:
             raise HTTPException(
                 status_code=422,
                 detail="department, from, and to are required",
             )
-
         if trend_to < trend_from:
             raise HTTPException(422, "to must not be before from")
-
         if (trend_to - trend_from).days + 1 > 92:
             raise HTTPException(422, "Date range must not exceed 92 days")
-
         if not db.employees.count_documents({"department": department}):
             raise HTTPException(404, "Department not found")
-
         start_dt = datetime.combine(
             trend_from, datetime.min.time()
         ).replace(tzinfo=UTC)
         end_exclusive = datetime.combine(
             trend_to + timedelta(days=1), datetime.min.time()
         ).replace(tzinfo=UTC)
-
         pipeline = [
             {"$documents": [{"day": start_dt}]},
             {"$densify": {
@@ -1288,21 +1041,18 @@ def explain_endpoint(
             }},
             {"$sort": {"date": 1}},
         ]
-
         collection_name = "attendance_logs"
         command = {
             "aggregate": 1,
             "pipeline": pipeline,
             "cursor": {},
         }
-
     explain = db.command("explain", command, verbosity="executionStats")
-    explain_text = str(explain).lower()
-
+    uses_ixscan, uses_collscan = scan_flags(explain)
     return {
         "endpoint": endpoint,
         "collection": collection_name,
         "explain": explain,
-                "uses_ixscan": "IXSCAN" in str(explain).upper(),
-        "uses_collscan": "COLLSCAN" in str(explain).upper(),
+        "uses_ixscan": uses_ixscan,
+        "uses_collscan": uses_collscan,
     }
