@@ -1,31 +1,11 @@
 # Technical Decisions
 
-## 1. Indexing Strategy
+1. **Indexes.** A unique `employees.emp_code` index enforces employee identity. A unique `(attendance_logs.emp_code, date)` index prevents duplicate employee-day records during concurrent punch-ins. `(emp_code, date)` supports employee-month queries; `(date, status)` supports common filters; `(date DESC, emp_code ASC)` supports attendance ordering. `(department, joined_on)` and `joined_on` support department and headcount queries. I rejected one wide index for every optional filter because it adds write cost without serving all combinations efficiently.
 
-Compound indexes support the most common query patterns, especially attendance lookups by employee and date, date-based analytics, and employee lookups by department. Index field order matters because MongoDB can efficiently use a compound index for queries matching its leading fields. The admin explain endpoint exposes execution statistics to help verify index usage.
+2. **Punch-in race.** Both requests may pass a lookup, but the unique index decides the outcome: one insert succeeds and the other raises `DuplicateKeyError`, converted to HTTP 409.
 
-## 2. Preventing Duplicate Punch-In
+3. **Ties.** The leaderboard applies `$rank`, then filters `rank <= limit`. Cutoff ties are all returned, so results can exceed `limit`; rows sort by late minutes descending, then employee code ascending.
 
-A unique compound index on `emp_code` and `date` prevents more than one attendance record for an employee on the same attendance date. Application-level checks alone are insufficient because simultaneous requests can both pass a check. The database constraint provides the final protection, and duplicate-key errors should be translated into an appropriate conflict response.
+4. **Headcount.** Department summary starts from employees who joined by month end, groups by department, and looks up logs afterward. Employees with zero logs still count.
 
-## 3. Leaderboard Ties
-
-The late-arrival leaderboard uses competition ranking. Employees with equal total late minutes receive the same rank, and the next rank skips accordingly. The rank filter is applied before the result is limited, so employees tied at the cutoff are not arbitrarily excluded.
-
-## 4. Employees Without Attendance Logs
-
-Attendance-based aggregation alone cannot include employees who have no matching attendance records. To report department headcount accurately, employee records must be considered separately from attendance logs. Missing attendance statistics should be represented with zero values where appropriate, rather than removing employees from headcount calculations.
-
-## 5. Scaling to 100 Times More Data
-
-I would review query plans and execution statistics, maintain indexes for actual query patterns, and avoid unnecessary document retrieval. Aggregation pipelines should filter early where possible. For larger workloads, I would measure database load, consider archival or retention policies, and evaluate pagination and deployment capacity using representative production-scale data.
-
-## Additional Technical Decisions
-
-- FastAPI exposes REST endpoints and interactive API documentation.
-- PyMongo provides access to MongoDB aggregation pipelines.
-- Attendance dates use the Asia/Kolkata calendar, while API timestamps use epoch milliseconds and MongoDB stores timestamps as BSON datetimes.
-- The department trend uses `$densify` for a daily date series and excludes weekends from working-day attendance rates.
-- Department summary average work hours use half-up rounding to two decimal places.
-- Regularization records preserve the actor, reason, timestamp, and field changes.
-- Environment variables supply database configuration; secrets and local environment files must not be committed.
+5. **100x scale.** I would benchmark 100,000-plus records and tune indexes from execution statistics. If analytics slow down, I would consider idempotently maintained daily summaries, keeping raw logs as source of truth.

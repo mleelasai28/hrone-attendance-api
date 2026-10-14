@@ -89,7 +89,7 @@ Do not commit `.env` files, credentials, or other secrets.
 
 ## Testing
 
-Use `/docs` to exercise the endpoints and inspect response codes and response bodies. Verify validation rules, attendance calculations, audit history, concurrency safeguards, and query plans.
+Use `/docs` to exercise endpoints and inspect response codes and response bodies. The project was syntax-checked and selected endpoints/query plans were smoke-tested during development; the full assignment edge-case suite and a 100k-record performance test have not been run.
 
 ## Verification Performed
 

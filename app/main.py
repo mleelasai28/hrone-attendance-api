@@ -131,7 +131,7 @@ class EmployeeIn(BaseModel):
     @field_validator("email")
     @classmethod
     def validate_email(cls, value):
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\\.[^@\s]+", value):
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
             raise ValueError("Invalid email address")
         return value
     @field_validator("shift_start", "shift_end")
@@ -355,7 +355,7 @@ def list_attendance(
     total = db.attendance_logs.count_documents(query)
     docs = list(
         db.attendance_logs.find(query)
-        .sort("date", DESCENDING)
+        .sort([("date", DESCENDING), ("emp_code", ASCENDING)])
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
@@ -544,7 +544,7 @@ def department_summary(month: str, department: Optional[str] = None):
     return list(db.employees.aggregate(pipeline))
 
 # ----------------------------- Late Leaderboard ------------------------
-@app.get("/analytics/late-leaderboard")
+@app.get("/analytics/leaderboard/late")
 def late_leaderboard(
     month: str,
     limit: int = Query(10, ge=1, le=50),
@@ -789,7 +789,7 @@ def explain_endpoint(
         command = {
             "find": collection_name,
             "filter": filters,
-            "sort": {"date": -1},
+            "sort": {"date": -1, "emp_code": 1},
             "skip": (page - 1) * page_size,
             "limit": page_size,
         }
